@@ -102,9 +102,9 @@ bool PDPServer2::init(
         return false;
     }
 
+    std::vector<nlohmann::json> backup_queue;
     if (_durability == TRANSIENT)
     {
-        std::vector<nlohmann::json> backup_queue;
         nlohmann::json backup_json;
         // if the DS is BACKUP, try to restore DDB from file
         discovery_db().backup_in_progress(true);
@@ -123,8 +123,6 @@ bool PDPServer2::init(
         discovery_db().backup_in_progress(false);
 
         discovery_db_.persistence_enable(get_ddb_queue_persistence_file_name());
-
-        process_backup_restore_queue(backup_queue);
     }
     else
     {
@@ -157,6 +155,12 @@ bool PDPServer2::init(
                     TimeConv::Duration_t2MilliSecondsDouble(
                         m_discovery.discovery_config.discoveryServer_client_syncperiod));
     ping_->restart_timer();
+
+    // restoring the queue msut be done after starting the routine
+    if (_durability == TRANSIENT)
+    {
+        process_backup_restore_queue(backup_queue);
+    }
 
     return true;
 }
@@ -1372,31 +1376,39 @@ void PDPServer2::send_announcement(
 bool PDPServer2::read_backup(nlohmann::json& ddb_json, std::vector<nlohmann::json>& /* new_changes */)
 {
     std::ifstream myfile;
+    bool ret = true;
     try
     {
         myfile.open(get_ddb_persistence_file_name(), std::ios_base::in);
         // read json object
         myfile >> ddb_json;
         myfile.close();
-
-        myfile.open(get_ddb_queue_persistence_file_name(), std::ios_base::in);
-
-        // std::string line;
-        // while (std::getline(myfile, line))
-        // {
-        //     nlohmann::json change_json = nlohmann::json::parse(line);
-
-        //     // Read every change, and store it in json format in a vector
-        //     new_changes.push_back(change_json);
-        // }
-
-        myfile.close();
     }
     catch(const std::exception& e)
     {
-        return false;
+        ret = false;
     }
-    return true;
+
+    // TODO uncomment this part when recover queues is finish
+    // try{
+    //     myfile.open(get_ddb_queue_persistence_file_name(), std::ios_base::in);
+
+    //     std::string line;
+    //     while (std::getline(myfile, line))
+    //     {
+    //         nlohmann::json change_json = nlohmann::json::parse(line);
+
+    //         // Read every change, and store it in json format in a vector
+    //         new_changes.push_back(change_json);
+    //     }
+
+    //     myfile.close();
+    // }
+    // catch(const std::exception& e)
+    // {
+    //     return ret;
+    // }
+    return ret;
 }
 
 
@@ -1476,22 +1488,29 @@ bool PDPServer2::process_backup_discovery_database_restore(nlohmann::json& j)
             length = it.value()["change"]["serialized_payload"]["length"].get<std::uint32_t>();
             (std::istringstream) it.value()["change"]["sample_identity"].get<std::string>() >> sample_identity_aux;
 
-            // Belongs to own server
-            if (sample_identity_aux.writer_guid() == mp_PDPWriter->getGuid())
+            if (it.value()["topic"] == discovery_db().virtual_topic())
             {
-                if (!edp->publications_writer_.second->reserve_Cache(&change_aux, length))
-                {
-                    logError(RTPS_PDP_SERVER, "Error creating CacheChange");
-                    // TODO release changes and exit
-                }
+                fastrtps::rtps::CacheChange_t* change_aux = new fastrtps::rtps::CacheChange_t();
             }
-            // It came from outside
             else
             {
-                if (!edp->publications_reader_.second->reserve_Cache(&change_aux, length))
+                // Belongs to own server
+                if (sample_identity_aux.writer_guid() == mp_PDPWriter->getGuid())
                 {
-                    logError(RTPS_PDP_SERVER, "Error creating CacheChange");
-                    // TODO release changes and exit
+                    if (!edp->publications_writer_.second->reserve_Cache(&change_aux, length))
+                    {
+                        logError(RTPS_PDP_SERVER, "Error creating CacheChange");
+                        // TODO release changes and exit
+                    }
+                }
+                // It came from outside
+                else
+                {
+                    if (!edp->publications_reader_.second->reserve_Cache(&change_aux, length))
+                    {
+                        logError(RTPS_PDP_SERVER, "Error creating CacheChange");
+                        // TODO release changes and exit
+                    }
                 }
             }
 
@@ -1507,7 +1526,8 @@ bool PDPServer2::process_backup_discovery_database_restore(nlohmann::json& j)
             // call listener to create proxy info for other entities different than server
             if (change_aux->write_params.sample_identity().writer_guid().guidPrefix !=
                     mp_PDPWriter->getGuid().guidPrefix
-                    && change_aux->kind == fastrtps::rtps::ALIVE)
+                    && change_aux->kind == fastrtps::rtps::ALIVE
+                    && it.value()["topic"] != discovery_db().virtual_topic())
             {
                 edp_pub_listener->onNewCacheChangeAdded(edp->publications_reader_.first, change_aux);
             }
@@ -1521,22 +1541,29 @@ bool PDPServer2::process_backup_discovery_database_restore(nlohmann::json& j)
             fastrtps::rtps::CacheChange_t* change_aux;
             (std::istringstream) it.value()["change"]["sample_identity"].get<std::string>() >> sample_identity_aux;
 
-            // Belongs to own server
-            if (sample_identity_aux.writer_guid() == mp_PDPWriter->getGuid())
+            if (it.value()["topic"] == discovery_db().virtual_topic())
             {
-                if (!edp->subscriptions_writer_.second->reserve_Cache(&change_aux, length))
-                {
-                    logError(RTPS_PDP_SERVER, "Error creating CacheChange");
-                    // TODO release changes and exit
-                }
+                fastrtps::rtps::CacheChange_t* change_aux = new fastrtps::rtps::CacheChange_t();
             }
-            // It came from outside
             else
             {
-                if (!edp->subscriptions_reader_.second->reserve_Cache(&change_aux, length))
+                // Belongs to own server
+                if (sample_identity_aux.writer_guid() == mp_PDPWriter->getGuid())
                 {
-                    logError(RTPS_PDP_SERVER, "Error creating CacheChange");
-                    // TODO release changes and exit
+                    if (!edp->subscriptions_writer_.second->reserve_Cache(&change_aux, length))
+                    {
+                        logError(RTPS_PDP_SERVER, "Error creating CacheChange");
+                        // TODO release changes and exit
+                    }
+                }
+                // It came from outside
+                else
+                {
+                    if (!edp->subscriptions_reader_.second->reserve_Cache(&change_aux, length))
+                    {
+                        logError(RTPS_PDP_SERVER, "Error creating CacheChange");
+                        // TODO release changes and exit
+                    }
                 }
             }
 
@@ -1549,7 +1576,8 @@ bool PDPServer2::process_backup_discovery_database_restore(nlohmann::json& j)
             // call listener to create proxy info for other entities different than server
             if (change_aux->write_params.sample_identity().writer_guid().guidPrefix !=
                     mp_PDPWriter->getGuid().guidPrefix
-                    && change_aux->kind == fastrtps::rtps::ALIVE)
+                    && change_aux->kind == fastrtps::rtps::ALIVE
+                    && it.value()["topic"] != discovery_db().virtual_topic())
             {
                 edp_sub_listener->onNewCacheChangeAdded(edp->subscriptions_reader_.first, change_aux);
             }
@@ -1570,6 +1598,7 @@ bool PDPServer2::process_backup_discovery_database_restore(nlohmann::json& j)
 bool PDPServer2::process_backup_restore_queue(std::vector<nlohmann::json>& new_changes)
 {
     fastrtps::rtps::SampleIdentity sample_identity_aux;
+    fastrtps::rtps::InstanceHandle_t instance_handle_aux;
     uint32_t length;
 
     EDPServer2* edp = static_cast<EDPServer2*>(mp_EDP);
@@ -1589,6 +1618,7 @@ bool PDPServer2::process_backup_restore_queue(std::vector<nlohmann::json>& new_c
             fastrtps::rtps::CacheChange_t* change_aux;
             length = json_change["serialized_payload"]["length"].get<std::uint32_t>();
             (std::istringstream) json_change["sample_identity"].get<std::string>() >> sample_identity_aux;
+            (std::istringstream) json_change["instance_handle"].get<std::string>() >> instance_handle_aux;
 
 <<<<<<< HEAD
 
@@ -1598,7 +1628,7 @@ bool PDPServer2::process_backup_restore_queue(std::vector<nlohmann::json>& new_c
             // Belongs to own server
             if (sample_identity_aux.writer_guid() == mp_PDPWriter->getGuid())
             {
-                if (discovery_db_.is_participant(sample_identity_aux.writer_guid()))
+                if (discovery_db_.is_participant(iHandle2GUID(instance_handle_aux)))
                 {
                     if (!mp_PDPWriterHistory->reserve_Cache(&change_aux, length))
                     {
@@ -1612,7 +1642,7 @@ bool PDPServer2::process_backup_restore_queue(std::vector<nlohmann::json>& new_c
                     }
 
                 }
-                else if (discovery_db_.is_writer(sample_identity_aux.writer_guid()))
+                else if (discovery_db_.is_writer(iHandle2GUID(instance_handle_aux)))
                 {
                     if (!edp->publications_writer_.second->reserve_Cache(&change_aux, length))
                     {
@@ -1625,7 +1655,7 @@ bool PDPServer2::process_backup_restore_queue(std::vector<nlohmann::json>& new_c
                         edp_pub_listener->onNewCacheChangeAdded(edp->publications_reader_.first, change_aux);
                     }
                 }
-                else if (discovery_db_.is_reader(sample_identity_aux.writer_guid()))
+                else if (discovery_db_.is_reader(iHandle2GUID(instance_handle_aux)))
                 {
                     if (!edp->subscriptions_writer_.second->reserve_Cache(&change_aux, length))
                     {
@@ -1642,7 +1672,7 @@ bool PDPServer2::process_backup_restore_queue(std::vector<nlohmann::json>& new_c
             // It came from outside
             else
             {
-                if (discovery_db_.is_participant(sample_identity_aux.writer_guid()))
+                if (discovery_db_.is_participant(iHandle2GUID(instance_handle_aux)))
                 {
                     if (!mp_PDPReaderHistory->reserve_Cache(&change_aux, length))
                     {
@@ -1656,7 +1686,7 @@ bool PDPServer2::process_backup_restore_queue(std::vector<nlohmann::json>& new_c
                     }
 
                 }
-                else if (discovery_db_.is_writer(sample_identity_aux.writer_guid()))
+                else if (discovery_db_.is_writer(iHandle2GUID(instance_handle_aux)))
                 {
                     if (!edp->publications_reader_.second->reserve_Cache(&change_aux, length))
                     {
@@ -1669,7 +1699,7 @@ bool PDPServer2::process_backup_restore_queue(std::vector<nlohmann::json>& new_c
                         edp_pub_listener->onNewCacheChangeAdded(edp->publications_reader_.first, change_aux);
                     }
                 }
-                else if (discovery_db_.is_reader(sample_identity_aux.writer_guid()))
+                else if (discovery_db_.is_reader(iHandle2GUID(instance_handle_aux)))
                 {
                     if (!edp->subscriptions_reader_.second->reserve_Cache(&change_aux, length))
                     {
