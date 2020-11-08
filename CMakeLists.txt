@@ -219,7 +219,7 @@ include(${PROJECT_SOURCE_DIR}/cmake/common/eprosima_libraries.cmake)
 eprosima_find_package(fastcdr REQUIRED)
 eprosima_find_thirdparty(Asio asio)
 eprosima_find_thirdparty(TinyXML2 tinyxml2)
-find_package(foonathan_memory REQUIRED)
+eprosima_find_thirdparty(foonathan-memory REQUIRED)
 find_package(ThirdpartyBoost REQUIRED)
 
 if(ANDROID)
